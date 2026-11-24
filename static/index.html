@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>预处理工作台 · Preproc Studio</title>
+<link rel="stylesheet" href="/static/style.css?v=1.1.0">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name" title="Preproc Studio">预处理工作台</span>
+      <span class="ver">1.1</span>
+    </div>
+
+    <div class="batch-picker">
+      <select id="batchSelect" title="切换批次"></select>
+      <button id="newBatchBtn" class="ghost">新建批次</button>
+      <button id="delBatchBtn" class="ghost" title="删除当前批次及其原图">删除批次</button>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="health" id="health"><span class="dot"></span><span>连接中</span></div>
+
+    <button id="preflightBtn" class="ghost">算子准入表</button>
+    <button id="editsBtn" class="ghost">改动记录</button>
+    <button id="settingsBtn" class="ghost">设置</button>
+    <button id="exportBtn" class="primary">导出流程配置</button>
+  </header>
+
+  <main class="layout">
+
+    <aside class="col left">
+      <div class="col-head">
+        <span>样本</span>
+        <span class="muted small" id="sampleCount">0</span>
+      </div>
+
+      <div class="sample-list" id="sampleList">
+        <div class="empty-hint">选择或新建一个批次</div>
+      </div>
+
+      <div class="batch-actions">
+        <button id="importDirBtn" class="ghost">导入文件夹</button>
+        <button id="runAllBtn" class="ghost">整批分析</button>
+      </div>
+
+      <div class="drop-zone" id="dropZone">
+        <span>拖入图片，或点击上传</span><br>
+        <span class="muted">png / jpg / bmp / tif</span>
+      </div>
+      <input type="file" id="fileInput" multiple accept="image/*" hidden>
+      <!-- 选文件夹：系统原生的目录选择器，选完整目录上传，不用手打绝对路径 -->
+      <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
+    </aside>
+
+    <section class="col center">
+
+      <div class="panel diag-panel" id="diagPanel">
+        <div class="panel-title">
+          <span>诊断</span>
+          <span class="muted small" id="diagProvider"></span>
+        </div>
+        <div class="diag-body" id="diagBody">
+          <div class="empty-hint">选中样本后分析，或从迭代记录里挑一条链</div>
+        </div>
+      </div>
+
+      <div class="panel chain-panel">
+        <div class="panel-title">
+          <span>算子链</span>
+          <div class="title-actions">
+            <span class="muted small" id="chainHint">自上而下执行</span>
+            <button id="roundsBtn" class="ghost tiny-btn">迭代记录</button>
+            <button id="addOpBtn" class="ghost tiny-btn">添加算子</button>
+            <button id="aiAgainBtn" class="ghost tiny-btn">生成方案</button>
+          </div>
+        </div>
+        <div class="chain" id="chain">
+          <div class="empty-hint">暂无算子链</div>
+        </div>
+        <div class="chain-foot">
+          <div class="quick-apply">
+            <span class="muted small">套用配方</span>
+            <select id="recipeSelect"></select>
+            <button id="applyRecipeBtn" class="ghost tiny-btn">套用</button>
+          </div>
+          <div class="verify-actions">
+            <div class="cand-switcher" id="candSwitcher"></div>
+            <button id="acceptBtn" class="success">通过核验</button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <aside class="col right">
+
+      <div class="panel viewer-panel">
+        <div class="panel-title">
+          <span id="viewerLabel">预览</span>
+          <div class="viewer-modes">
+            <button class="mode-btn active" data-mode="final">单图</button>
+            <button class="mode-btn" data-mode="compare">对比</button>
+          </div>
+        </div>
+
+        <div class="viewer" id="viewer">
+          <div class="empty-hint">暂无图像</div>
+        </div>
+
+        <div class="step-strip" id="stepStrip"></div>
+
+        <div class="viewer-actions">
+          <button id="metricsBtn" class="ghost">指标</button>
+          <button id="auditBtn" class="ghost">伪影审计</button>
+        </div>
+      </div>
+
+    </aside>
+
+  </main>
+
+  <footer class="statusbar">
+    <span id="statusText">就绪</span>
+    <span class="spacer"></span>
+    <span class="muted small" id="statusMeta"></span>
+  </footer>
+
+</div>
+
+<div class="modal-root" id="modalRoot"></div>
+
+<div class="lightbox" id="lightbox" hidden>
+  <div class="lightbox-bar">
+    <span id="lightboxLabel"></span>
+    <span class="muted small">点击遮罩或按 Esc 关闭</span>
+    <button class="lightbox-mode" id="lightboxPairBtn" hidden>两张对比</button>
+    <button class="lightbox-close" id="lightboxClose" title="关闭">×</button>
+  </div>
+  <div class="lightbox-stage single" id="lightboxStage"></div>
+</div>
+
+<script src="/static/app.js?v=1.1.0"></script>
+</body>
+</html>

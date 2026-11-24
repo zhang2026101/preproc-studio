@@ -1,0 +1,13 @@
+{
+  "provider": "rules",
+  "preset": "deepseek",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "api_key": "",
+  "timeout": 60,
+  "detail": "low",
+  "image_style": "data_url",
+  "image_max_side": 1024,
+  "max_tokens": 2000,
+  "extra_body": ""
+}

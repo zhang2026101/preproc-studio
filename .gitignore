@@ -1,0 +1,33 @@
+# ---------- 运行时数据（含 API Key 与客户图片，绝不入库）----------
+data/
+!data/.gitkeep
+
+# ---------- 自己的测试素材 ----------
+samples/
+samples_b/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------- 答辩材料与临时产物 ----------
+*.pptx
+*.docx
+~$*
+docs/_local/
+
+# ---------- 密钥与凭据 ----------
+.env
+.env.*
+*.pem
+*.key
+.git-token
