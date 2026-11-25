@@ -25,7 +25,7 @@ from . import __version__
 from . import export as EX
 from . import metrics as MT
 from . import vlm as VLM
-from .ops import SCHEMA, apply_with_stages, default_params
+from .ops import SCHEMA, apply_with_stages, default_params, normalize_stages
 from .recipes import DIAGNOSES, RECIPES, RECIPE_BY_ID, candidates_for
 from .store import Store, imread_unicode
 
@@ -37,6 +37,35 @@ STATIC = os.path.join(ROOT, "static")
 
 store = Store(DATA)
 app = FastAPI(title="Preproc Studio", version=__version__)
+
+# 接口版本：前端拿 /api/health 里的这个数和自己期望的值比。
+# 静态资源是 no-store（刷新就新），但 .py 改过不重启不生效——
+# 这会造成"按钮在、接口 404"的假故障，所以让后端自己报一下版本。
+API_VERSION = 3
+
+
+def custom_recipes() -> list[dict]:
+    """用户自己存下来的算子链（「保存为配方」）。
+
+    每次现读盘：文件很小，图省事缓存出错更难查——手动改 json 也该立刻生效。
+    """
+    out = []
+    for r in store.list_recipes():
+        out.append({
+            "id": r["id"],
+            "desc": r.get("desc") or "自定义链",
+            "family": "custom",
+            "stages": r["stages"],
+            "custom": True,
+            "created": r.get("created"),
+        })
+    return out
+
+
+# 导出、批次聚合都靠 RECIPE_BY_ID 查方案描述。自定义链不登记进去，
+# 导出时会把它写成「AI 自主拼接」，配流程的人就找不到对应章节了。
+for _r in custom_recipes():
+    RECIPE_BY_ID[_r["id"]] = _r
 
 
 @app.middleware("http")
@@ -75,6 +104,7 @@ def health():
     return {
         "ok": True,
         "version": app.version,
+        "api": API_VERSION,
         "provider": c.get("provider"),
         "model": c.get("model"),
         "has_key": bool(c.get("api_key")),
@@ -108,9 +138,61 @@ def schema():
         "recipes": [
             {"id": r["id"], "desc": r["desc"], "family": r["family"], "stages": r["stages"]}
             for r in RECIPES
-        ],
+        ] + custom_recipes(),
         "gate": MT.GATE,
     }
+
+
+@app.get("/api/recipes")
+def list_recipes():
+    """自定义算子链列表。配方库本身在代码里，这里只有用户存的那部分。"""
+    return {"recipes": custom_recipes()}
+
+
+@app.post("/api/recipes")
+def create_recipe(payload: dict = Body(...)):
+    """把界面上当前这条链存成可复用的配方。
+
+    存之前过一遍 normalize_stages：算子白名单、参数 schema、超界钳制、
+    链首补 gray。理由和 AI 拼链一样——存进来的东西必须当场就能跑，
+    否则"套用"之后才发现参数非法，问题会被推迟到演示现场。
+    """
+    stages = payload.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise HTTPException(400, "算子链为空，没有可保存的内容")
+
+    clean, notes = normalize_stages(stages)
+    if not clean:
+        raise HTTPException(400, "没有可保存的算子（全部未通过校验）")
+
+    name = str(payload.get("name") or "").strip()[:24] or "自定义链"
+    rec = {
+        "id": "u" + uuid.uuid4().hex[:6],
+        "desc": name,
+        "family": "custom",
+        "stages": clean,
+        "custom": True,
+        "created": time.time(),
+    }
+    store.add_recipe(rec)
+    RECIPE_BY_ID[rec["id"]] = rec
+    # notes 是钳制/截断的说明，交给前端提示，不静默改人存的东西
+    return {"ok": True, "recipe": rec, "notes": notes}
+
+
+@app.delete("/api/recipes/{rid}")
+def delete_recipe(rid: str):
+    """删掉自己存的链。
+
+    内置配方写在代码里，不提供删除——那是产品的默认能力，删了下次升级又回来。
+    已经用过这条链的样本不受影响：样本里存的是具体 stages，不是对配方的引用。
+    """
+    if any(r["id"] == rid for r in RECIPES):
+        raise HTTPException(400, "内置配方不可删除")
+    if not store.delete_recipe(rid):
+        raise HTTPException(404, "配方不存在")
+    RECIPE_BY_ID.pop(rid, None)
+    return {"ok": True, "deleted": rid}
 
 
 @app.get("/api/presets")
@@ -637,7 +719,7 @@ def switch_candidate(bid: str, sid: str, payload: dict = Body(...)):
         patch["note"] = "当前候选未通过伪影闸门，导出前需人工复核"
         warning = "这条候选未通过伪影闸门（噪声或截断超限），已按你的选择切换，导出前请人工确认"
     else:
-        # 切回通过/告警的链，把"闸门全灭需复核"的标记撤掉（标记描述的是当前这条链）
+        # 切回通过/警告的链，把"闸门全灭需复核"的标记撤掉（标记描述的是当前这条链）
         patch["review_required"] = False
         if (s.get("note") or "").startswith(("闸门全灭", "当前候选未通过")):
             patch["note"] = ""
@@ -882,7 +964,10 @@ def preflight(payload: dict = Body(...)):
                 imgs.append(im)
     if not imgs:
         raise HTTPException(400, "没有可用图像")
-    return AG.preflight(imgs, max_side=int(payload.get("max_side") or 900))
+    # 内置配方 + 用户自己存的链一起进表。自定义链同样可能把噪声放大成假缺陷，
+    # 不参与准入判断等于给自己开后门。
+    return AG.preflight(imgs, max_side=int(payload.get("max_side") or 900),
+                        recipes=list(RECIPES) + custom_recipes())
 
 
 @app.get("/api/batches/{bid}/stats")

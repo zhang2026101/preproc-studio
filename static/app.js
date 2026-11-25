@@ -14,6 +14,7 @@ const S = {
   sampleId: null,
   analysis: null,
   stages: [],
+  baseStages: null,   // 载入时的链，用来判断"有没有改过"（决定保存按钮能不能点）
   steps: [],
   activeStep: -1,
   viewMode: "final",
@@ -27,6 +28,8 @@ const S = {
   stageTimer: null,
   chainMs: 0,
   pending: false,
+  progressDismissed: false,
+  warnedStale: false,
   lightboxToken: 0,
   lb: null,
   roundsCache: null,
@@ -104,6 +107,11 @@ function postJson(path, body) {
 
 /* ---------------------------------------------------------------- 顶栏/批次 */
 
+/* 与后端 /api/health 的 api 字段对齐。静态资源是 no-store（刷新即新），
+   但 .py 改过不重启不生效——那会表现成"按钮在、接口 404"的假故障。
+   后端版本低于这个数就在这里挑明，别让人对着旧进程排查代码。 */
+const API_COMPAT = 3;
+
 async function loadHealth() {
   try {
     const h = await api("/api/health");
@@ -116,6 +124,26 @@ async function loadHealth() {
     $("#health").title = h.has_key
       ? `模型 ${h.model}  已配置 key`
       : "未配置 API key，使用本地规则诊断。点「设置」可接 DeepSeek / 百炼 / 本地模型";
+
+    // 左上角版本号跟后端走：只改 app/__init__.py 一处，界面、导出配置单一起变。
+    // 连旧进程时这里会显示旧版本，正好和下面的"后端是旧进程"对上。
+    const tag = $("#verTag");
+    if (tag && h.version) {
+      tag.textContent = String(h.version).split(".").slice(0, 2).join(".");
+      tag.title = `Preproc Studio v${h.version}`;
+    }
+
+    if (!h.api || h.api < API_COMPAT) {
+      dot.className = "dot warn";
+      label.textContent = "后端是旧进程 · 请重启";
+      $("#health").title =
+        `前端已经更新，但后端进程还在跑旧代码（api=${h.api || "无"}，需要 ${API_COMPAT}）。` +
+        `改过 .py 必须重启 run.py，只刷新页面不够。新接口会 404。`;
+      if (!S.warnedStale) {
+        S.warnedStale = true;
+        toast("后端进程是旧的：改过 .py 需要重启 run.py，刷新页面不够", true);
+      }
+    }
   } catch (e) {
     $("#health .dot").className = "dot bad";
     $("#health span:last-child").textContent = "后端未连接";
@@ -255,6 +283,7 @@ async function selectSample(sid) {
   S.stages = JSON.parse(JSON.stringify(s.stages || []));
   S.steps = [];
   S.activeStep = -1;
+  markBase();
   renderCandidateSwitcher();
 
   const matchRound = (s.rounds || []).find((r) => r.ok && r.stages &&
@@ -307,6 +336,107 @@ function clearCenter(keepViewer) {
 
 /* ---------------------------------------------------------------- AI 分析 */
 
+/* 生成方案期间盖一层弹窗。
+ *
+ * 不报百分比：后端是一次同步请求，返回前没有任何可报的中间态，
+ * 而总耗时由模型思考长度决定（8–25 秒，波动很大）。
+ * 编一个百分比走到 90% 再卡十几秒，比转圈更像死机。
+ * 所以报的是真数字——已用时；阶段文案只说明"在跑什么"，不声称剩余时间。
+ */
+const PROGRESS_STEPS = [
+  "正在看图诊断成像问题…",
+  "试跑配方库候选…",
+  "生成候选算子链（等模型返回，最慢的一段）…",
+  "参数精修搜索…",
+  "整理结果与逐节预览…",
+];
+const PROGRESS_STEP_AT = [0, 3000, 6500, 14000, 21000];
+
+function isProgressOpen() {
+  return !!document.querySelector("#modalRoot .progress-card");
+}
+
+function openProgressModal() {
+  const root = $("#modalRoot");
+  if (!root) return;
+  root.innerHTML = `<div class="modal-mask">
+    <div class="progress-card" role="status" aria-live="polite">
+      <div class="progress-top">
+        <span class="spin"></span>
+        <div>
+          <div class="progress-title">正在生成方案</div>
+          <div class="progress-stage" id="progressStage">${PROGRESS_STEPS[0]}</div>
+        </div>
+      </div>
+      <div class="progress-track"><i></i></div>
+      <div class="progress-meta">
+        <span>已用时 <b id="progressClock">0.0</b> 秒</span>
+        <span class="muted small">一般 8–25 秒</span>
+      </div>
+      <div class="progress-foot">
+        <button class="ghost tiny-btn" onclick="dismissProgress()">转到后台，完成后提示</button>
+      </div>
+    </div>
+  </div>`;
+  root.style.pointerEvents = "auto";
+}
+
+/* 只关自己的弹窗：跑的过程中用户可能点开别的弹窗（设置、改动记录），
+   这时候不能把人家的窗口一起清掉。 */
+function closeProgressModal() {
+  if (!isProgressOpen()) return;
+  $("#modalRoot").innerHTML = "";
+  $("#modalRoot").style.pointerEvents = "none";
+}
+
+function dismissProgress() {
+  S.progressDismissed = true;
+  closeProgressModal();
+}
+window.dismissProgress = dismissProgress;
+
+/* 完成时先在弹窗里把数字定住，再关。
+ * 直接关掉的话，用户只来得及看见诊断卡上的"诊断耗时 1981 ms"，
+ * 会以为弹窗里那个二十几秒是算错的——其实是端到端 vs 单次调用。
+ * 这里把两个口径并排写清楚。 */
+let progressSeq = 0;
+
+function finishProgress(totalMs) {
+  if (!isProgressOpen()) return;
+  const card = document.querySelector("#modalRoot .progress-card");
+  if (!card) return;
+  const my = progressSeq;
+
+  const spin = card.querySelector(".spin");
+  if (spin) {
+    const ok = document.createElement("span");
+    ok.className = "progress-check";
+    ok.textContent = "✓";
+    spin.replaceWith(ok);
+  }
+
+  const diag = S.analysis && S.analysis.diagnosis;
+  const diagMs = diag && diag.elapsed_ms > 0
+    ? `　其中诊断 ${(diag.elapsed_ms / 1000).toFixed(1)} 秒`
+    : "";
+  const stage = document.getElementById("progressStage");
+  if (stage) stage.textContent = `总用时 ${(totalMs / 1000).toFixed(1)} 秒${diagMs}`;
+
+  const title = card.querySelector(".progress-title");
+  if (title) title.textContent = "方案已生成";
+
+  // 进度条和"已用时/转到后台"在完成态没有意义，直接收掉
+  ["progress-track", "progress-meta", "progress-foot"].forEach((cls) => {
+    const el = card.querySelector("." + cls);
+    if (el) el.remove();
+  });
+
+  setTimeout(() => {
+    // 期间用户可能又点了「生成方案」，不能把新弹窗关掉
+    if (my === progressSeq) closeProgressModal();
+  }, 900);
+}
+
 async function analyzeCurrent() {
   if (!S.sampleId || S.busy) return;
   S.busy = true;
@@ -316,40 +446,45 @@ async function analyzeCurrent() {
   S.obsOpen = false;
   status("AI 正在诊断并试跑候选…", "最多 3 轮");
 
-  // 全流程 8-25 秒，耗时主要取决于模型思考长度，波动很大。
-  // 不报进度的话，用户会以为卡死。这里按阶段轮播文案（不假装精确百分比）。
-  const STEPS = [
-    "正在看图诊断成像问题…",
-    "试跑配方候选…",
-    "正在生成候选算子链…",
-    "参数精修搜索…",
-    "整理结果…",
-  ];
+  S.progressDismissed = false;
+  progressSeq++;
+  openProgressModal();
+  const now = () => (window.performance && performance.now ? performance.now() : Date.now());
+  const t0 = now();
+
+  // 阶段文案按时间轮播，面板里也留一份——弹窗被"转到后台"之后还能看到在跑
   let stepIdx = 0;
   const paint = () => {
     const b = $("#diagBody");
-    if (b && b.querySelector(".spin")) {
-      b.innerHTML = `<div class="empty-hint"><span class="spin"></span> ${STEPS[stepIdx]}</div>`;
-    }
+    if (b) b.innerHTML = `<div class="empty-hint"><span class="spin"></span> ${PROGRESS_STEPS[stepIdx]}</div>`;
   };
-  paint();
-  S.stageTimer = setInterval(() => {
-    stepIdx = Math.min(stepIdx + 1, STEPS.length - 1);
+  const tick = () => {
+    const ms = now() - t0;
+    while (stepIdx < PROGRESS_STEPS.length - 1 && ms >= PROGRESS_STEP_AT[stepIdx + 1]) stepIdx++;
+    const clock = $("#progressClock");
+    if (clock) clock.textContent = (ms / 1000).toFixed(1);
+    const stage = $("#progressStage");
+    if (stage) stage.textContent = PROGRESS_STEPS[stepIdx];
     paint();
-  }, 3800);
+  };
+  tick();
+  S.stageTimer = setInterval(tick, 200);
 
+  let totalMs = 0;
+  let failed = false;
   try {
     const d = await postJson(`/api/batches/${S.batchId}/samples/${S.sampleId}/analyze`, {});
+    totalMs = now() - t0;
     S.analysis = d;
     S.stages = JSON.parse(JSON.stringify(d.stages || []));
     S.aiStages = JSON.parse(JSON.stringify(d.stages || []));
     S.rejected = [];
+    markBase();   // 系统刚给出来的链就是基准，没动过「保存为配方」不该亮
 
-    renderDiagnosis(d.diagnosis, d);
-    renderRounds(d.rounds || [], d.stop_reason);
-    renderChain();
-    renderCandidateSwitcher();
-
+    // 先把 S.steps / S.phase / S.activeStep 落定，再渲染算子链。
+    // 顺序反了会出现"第一次生成方案时链上的缩略图全是空的"——
+    // renderChain 读的是 S.steps[i+1]，那时它还是空数组，于是每行都画成占位符；
+    // 切到别的样本再切回来（另一条路径已经有 S.steps）才恢复正常。
     const rec = d.recommendation;
     S.chainMs = d.chain_ms || 0;
     S.phase = rec ? rec.phase : "preset";
@@ -358,8 +493,15 @@ async function analyzeCurrent() {
     S.steps = rec
       ? (d.rounds.find((r) => r.recipe_id === rec.recipe_id) || {}).steps || []
       : [];
+    // 没有逐节预览时不能留着上一条链的步号，否则会高亮到错误的卡片
+    S.activeStep = S.steps.length ? S.steps.length - 1 : -1;
+
+    renderDiagnosis(d.diagnosis, d);
+    renderRounds(d.rounds || [], d.stop_reason);
+    renderChain();
+    renderCandidateSwitcher();
+
     if (S.steps.length) {
-      S.activeStep = S.steps.length - 1;
       renderViewer();
       renderStepStrip();
       renderMetrics();
@@ -368,14 +510,26 @@ async function analyzeCurrent() {
       $("#viewer").innerHTML = `<img src="data:image/jpeg;base64,${panel.img}" alt="">`;
     }
 
-    status(`分析完成 · 试了 ${d.candidates_tried} 条 · ${d.elapsed_ms} ms`, d.stop_reason);
+    // 状态栏用端到端墙钟，跟弹窗里看到的数是同一个，不另起一套口径。
+    // d.elapsed_ms 是服务端 run_agent 内部的候选试跑耗时（不含诊断、不含预览编码），
+    // 两者差几秒是正常的，所以不放在这里比。
+    const totalSec = (totalMs / 1000).toFixed(1);
+    status(`分析完成 · 候选 ${d.candidates_tried} 条 · 总用时 ${totalSec} 秒`, d.stop_reason);
+    // 弹窗被转到后台时结果没人"看到"，补一条提示，否则用户以为还要等
+    if (S.progressDismissed) toast(`方案已生成 · 总用时 ${totalSec} 秒`);
     await refreshSampleFlags();
+    // 候选按钮的"当前选中"读的是 sample.selected_recipe，而这个字段刚被
+    // refreshSampleFlags 刷新过——不重画一次，第一次生成方案时系统推荐的那条不会被标出来。
+    renderCandidateSwitcher();
   } catch (e) {
+    failed = true;
     toast("分析失败：" + e.message, true);
     status("分析失败");
     renderDiagnosis(S.sample && S.sample.diagnosis, null);
   } finally {
     if (S.stageTimer) { clearInterval(S.stageTimer); S.stageTimer = null; }
+    if (failed) closeProgressModal();
+    else finishProgress(totalMs);
     S.busy = false;
     btn.disabled = false;
   }
@@ -414,8 +568,10 @@ function renderDiagnosis(diag, full) {
   const rows = [];
   const conf = diag.confidence;
   rows.push(`<span>置信度 <b>${conf > 0 ? (conf * 100).toFixed(0) + "%" : "—（规则判定无置信度）"}</b></span>`);
-  // 命中缓存时 elapsed 是 0，显示"耗时 0 ms"只会让人以为是 bug
-  if (diag.elapsed_ms > 0) rows.push(`<span>耗时 <b>${diag.elapsed_ms} ms</b></span>`);
+  // 命中缓存时 elapsed 是 0，显示"耗时 0 ms"只会让人以为是 bug。
+  // 这里必须写"诊断耗时"：同屏还有弹窗的总用时和状态栏的候选试跑耗时，
+  // 三个数字口径不同，笼统写"耗时"会让人以为哪儿算错了。
+  if (diag.elapsed_ms > 0) rows.push(`<span>诊断耗时 <b>${diag.elapsed_ms} ms</b></span>`);
   if (full && full.candidates_tried) rows.push(`<span>试跑 <b>${full.candidates_tried} 条</b></span>`);
   if (full && full.compose) {
     const okc = full.compose.ok;
@@ -478,6 +634,7 @@ function renderChain() {
   const box = $("#chain");
   if (!S.stages.length) {
     box.innerHTML = `<div class="empty-hint"><div class="empty-figure"></div>暂无算子链<br><span class="small">可添加算子，或点「生成方案」</span></div>`;
+    syncSaveBtn();
     return;
   }
   const schemaFor = (op) => (S.schema.ops.find((o) => o.op === op) || { label: op, params: {}, hint: "" });
@@ -528,6 +685,7 @@ function renderChain() {
   // 线只该穿过算子卡片，不该切到"添加算子"的虚框里。
   box.innerHTML = `<div class="chain-body">${cards}</div>`
     + `<div class="chain-add" data-act="add-op">＋ 添加算子</div>`;
+  syncSaveBtn();
   requestAnimationFrame(fitChainThumbs);
 }
 
@@ -569,7 +727,7 @@ function roundsHTML(rounds) {
 
     const v = r.audit ? r.audit.verdict : "pass";
     const badge = v === "reject" ? `<span class="badge danger">拒绝</span>`
-      : v === "warn" ? `<span class="badge warn">告警</span>`
+      : v === "warn" ? `<span class="badge warn">警告</span>`
         : `<span class="badge ok">可过</span>`;
 
     const ops = (r.stages || []).map((x) => x.op).join("→");
@@ -968,18 +1126,40 @@ function openMetricsModal() {
   const step = S.metricsCache;
   if (!step) return toast("还没有可显示的指标", true);
   const at = step.step === 0 ? "原图" : `第 ${step.step} 步 · ${step.label || step.op}`;
+  // 主弹窗只放数：得分 + 六项指标。口径、权重、为什么这样算，
+  // 统统收进二级弹窗——查数的人不用翻过三屏解释才看到表。
   openModal(`指标　${at}`,
     `<div class="modal-table">${metricsHTML(step)}</div>
-     <p class="muted" style="margin:12px 0 0;font-size:13px">
-       所有数值相对原图计算。正向提升为绿，下降为红，无方向性的指标（平均亮度）用中性色。</p>`,
-    `<button onclick="closeModal()">关闭</button>`);
+     <p class="muted" style="margin:10px 0 0;font-size:13px">
+       相对原图计分，原图恒为 0　·　分数只用于排序与早停，<b>不等于检出率</b></p>`,
+    `<button onclick="showMetricsHelp()">算法口径说明</button>
+     <button onclick="closeModal()">关闭</button>`);
 }
 window.openMetricsModal = openMetricsModal;
+
+function showMetricsHelp() {
+  openSubModal("算法口径说明", `
+     <p style="margin-top:0;color:var(--text-2)">
+       这个分回答一个问题：<b>这条链改完之后，图里的信息量比原图多了多少。</b>
+       不用绝对分，全部相对原图算——<b>原图恒为 0</b>，所以正数就是比原来好、负数就是变差了。
+     </p>
+     <p style="color:var(--text-2)">
+       四项加权：信息熵 0.40（能看到多少灰度层次）、局部对比度 0.28（缺陷和背景差多少）、
+       梯度能量 0.18（边缘清不清楚）、灰度范围利用率 0.14（有没有只用中间一小段）。
+       每项都换算成"相对原图的倍数"：1 倍得 0 分、2 倍 +0.5、3 倍 +1。
+       截断率单独作惩罚项，超过 10% 的部分按 1.5 的权重扣——压死两端换中间对比度是最常见的偷懒。
+     </p>
+     <p class="muted" style="margin:0;font-size:13px">
+       正向提升为绿，下降为红，无方向性的指标（平均亮度）用中性色。
+       <b>分数只用于排序和早停，不等于检出率</b>——真实效果要回 VisionMaster 跑。
+     </p>`);
+}
+window.showMetricsHelp = showMetricsHelp;
 
 function auditHTML(step) {
   if (!step || !step.audit) return `<div class="empty-hint">—</div>`;
   const a = step.audit;
-  const map = { pass: ["通过", "ok"], warn: ["告警", "warn"], reject: ["拒绝", "danger"] };
+  const map = { pass: ["通过", "ok"], warn: ["警告", "warn"], reject: ["拒绝", "danger"] };
   const [cn, cls] = map[a.verdict] || ["—", ""];
   const riskPct = Math.round((a.risk || 0) * 100);
   const riskLv = a.verdict === "reject" ? "lv-bad" : a.verdict === "warn" ? "lv-warn" : "lv-ok";
@@ -1015,15 +1195,33 @@ function openAuditModal() {
   const step = S.auditCache;
   if (!step) return toast("还没有可审计的结果", true);
   const v = step.audit.verdict;
-  const cn = { pass: "通过", warn: "告警", reject: "拒绝" }[v] || "—";
+  const cn = { pass: "通过", warn: "警告", reject: "拒绝" }[v] || "—";
+  // 主弹窗只放结论 + 三项实测值 + 触发了哪条；判据阈值收进二级弹窗
   openModal(`伪影审计　${cn}`,
-    `<div class="modal-table">${auditHTML(step)}</div>
-     <p class="muted" style="margin:12px 0 0;font-size:13px">
-       闸门判据：截断率 &gt;10%，或噪声 σ 超 7.6/255 且放大 &gt;2.5× 即判拒绝——
-       这类链会把噪声标成缺陷，配进流程后会误检。</p>`,
-    `<button onclick="closeModal()">关闭</button>`);
+    `<div class="modal-table">${auditHTML(step)}</div>`,
+    `<button onclick="showAuditHelp()">闸门判据说明</button>
+     <button onclick="closeModal()">关闭</button>`);
 }
 window.openAuditModal = openAuditModal;
+
+function showAuditHelp() {
+  openSubModal("闸门判据说明", `
+     <p style="margin-top:0;color:var(--text-2)">
+       这道闸门拦的是<b>把噪声放大成假缺陷</b>的方案——那种图看着像有瑕疵，标进去就是错标签，
+       配进流程还会误检。它查三样：
+     </p>
+     <p style="color:var(--text-2)">
+       <b>截断率超 10%</b>：像素被压成纯黑或纯白，两端原本能看见的缺陷直接消失；
+       <b>噪声 σ 超 7.6/255 且放大 2.5 倍以上</b>：颗粒会被当成缺陷——这两条直接判拒绝。
+       <b>台阶指数超 0.5</b>：量化台阶被放成假边缘，只警告、不拦。
+     </p>
+     <p class="muted" style="margin:0;font-size:13px">
+       噪声要"绝对值 + 放大倍数"同时成立才拦：只看倍数会误杀 Retinex 这类在干净图上拉伸的算法——
+       它会把 0.001 的噪声底抬到 0.017，看着放大 8.7 倍，但肉眼根本看不出。
+       全部候选都被拒时，会给一条"最不坏"的并标「需复核」，不让人空手。
+     </p>`);
+}
+window.showAuditHelp = showAuditHelp;
 
 /* 三个入口按钮上直接带关键值，不点开也知道结论 */
 function syncEntryButtons() {
@@ -1045,7 +1243,7 @@ function syncEntryButtons() {
   if (ab) {
     const st = S.auditCache;
     const v = st && st.audit ? st.audit.verdict : null;
-    const cn = { pass: "通过", warn: "告警", reject: "拒绝" }[v];
+    const cn = { pass: "通过", warn: "警告", reject: "拒绝" }[v];
     ab.textContent = cn ? `伪影 ${cn}` : "伪影审计";
     ab.className = "ghost" + (v === "reject" ? " is-bad" : v === "warn" ? " is-warn" : "");
     ab.disabled = !st;
@@ -1056,6 +1254,7 @@ function syncEntryButtons() {
 
 function markEdited(kind, op) {
   S.phase = "preset";   // 人动过之后就不再是"AI 自拟"了，徽章要诚实
+  syncSaveBtn();        // 改过就该能存，这里覆盖滑杆/参数这种不重绘链的改动
   saveStages(kind, op);
 }
 
@@ -1069,8 +1268,11 @@ async function saveStages(kind, op, note) {
       recipe_id: S.sample ? S.sample.selected_recipe : null,
       note: note || "",
     });
-    S.sample.edited = true;
-    S.sample.edit_count = (S.sample.edit_count || 0) + 1;
+    // 样本可能还没选中（例如从配方库直接套一条链试跑），不能假定 S.sample 一定在
+    if (S.sample) {
+      S.sample.edited = true;
+      S.sample.edit_count = (S.sample.edit_count || 0) + 1;
+    }
     renderSampleList();
   } catch (e) {
     toast("保存失败：" + e.message, true);
@@ -1110,10 +1312,158 @@ function applyRecipeById(rid) {
   const r = S.schema.recipes.find((x) => x.id === rid);
   if (!r) return;
   S.stages = JSON.parse(JSON.stringify(r.stages));
+  markBase();
   renderChain();
   markEdited("reset", null, "套用配方 " + rid);
   previewChain(true);
 }
+
+/* ---------------------------------------------------------------- 保存为配方 */
+
+/* 按钮的可用条件：链非空，且整条链（算子 + 参数）和载入时不一样。
+   载入的来源有三个：AI 给出的候选、套用的配方、样本里存着的链。
+   三者都算"已经存在的东西"，所以刚载入时按钮是灰的，改过才亮。 */
+function chainDirty() {
+  if (!S.stages.length) return false;
+  if (!S.baseStages) return true;   // 没有基准就别拦着人存
+  return JSON.stringify(S.stages) !== JSON.stringify(S.baseStages);
+}
+
+function syncSaveBtn() {
+  const btn = $("#saveRecipeBtn");
+  if (!btn) return;
+  const dirty = chainDirty();
+  btn.disabled = !dirty;
+  btn.title = dirty
+    ? "把当前这条链存进配方库，之后可在左侧下拉里一键套用"
+    : "当前链与载入时一致，没有需要保存的改动";
+}
+
+/* 记住"这版就是基准"：载入候选、套用配方、保存成功后都调它 */
+function markBase() {
+  S.baseStages = JSON.parse(JSON.stringify(S.stages || []));
+  syncSaveBtn();
+}
+
+function renderRecipeSelect(preferId) {
+  const sel = $("#recipeSelect");
+  if (!sel || !S.schema) return;
+  const rs = (S.schema.recipes || []).filter((r) => r.id !== "r00_baseline");
+  const builtin = rs.filter((r) => !r.custom);
+  const custom = rs.filter((r) => r.custom);
+  const opt = (r) => `<option value="${r.id}">${esc(r.id)} · ${esc(r.desc)}</option>`;
+  let html = builtin.map(opt).join("");
+  if (custom.length) {
+    // 分隔项不可选：配方库是产品自带的，下面是这个人自己存的
+    html += `<option disabled>—— 自定义（${custom.length}）——</option>`;
+    html += custom.map(opt).join("");
+  }
+  sel.innerHTML = html;
+  if (preferId) sel.value = preferId;
+  syncRecipeBtns();
+}
+
+function currentRecipe() {
+  const sel = $("#recipeSelect");
+  if (!sel || !sel.value || !S.schema) return null;
+  return (S.schema.recipes || []).find((r) => r.id === sel.value) || null;
+}
+
+/* 删除按钮常显、内置配方给灰：藏起来会让人以为没有这个功能，
+   灰着 + 悬停说明"内置配方不可删除"，规则才看得见。 */
+function syncRecipeBtns() {
+  const sel = $("#recipeSelect");
+  const btn = $("#delRecipeBtn");
+  if (!sel) return;
+  const opt = sel.options[sel.selectedIndex];
+  if (opt) sel.title = opt.text;
+  if (!btn) return;
+  const r = currentRecipe();
+  const canDel = !!(r && r.custom);
+  btn.disabled = !canDel;
+  btn.title = canDel
+    ? `删除自定义链「${r.desc}」（已套用过它的样本不受影响）`
+    : (r ? "内置配方不可删除" : "没有可删除的配方");
+}
+
+function openDeleteRecipeModal() {
+  const r = currentRecipe();
+  if (!r) return;
+  if (!r.custom) return toast("内置配方不可删除", true);
+  const seq = (r.stages || []).map((s) => s.op).join(" → ");
+  openModal("删除自定义链", `
+    <p style="margin-top:0">确认删除 <b>${esc(r.desc)}</b>（${esc(r.id)}）？</p>
+    <div class="reason">${esc(seq)}</div>
+    <div class="reason" style="margin-top:12px">
+      只删配方库里这一条。已经套用过它的样本保持原样——样本存的是具体算子与参数，
+      不是对配方的引用；只是导出时这条链会退回按诊断标签命名。</div>`,
+    `<button onclick="closeModal()">取消</button>
+     <button class="danger" onclick="doDeleteRecipe('${esc(r.id)}')">删除</button>`);
+}
+window.openDeleteRecipeModal = openDeleteRecipeModal;
+
+async function doDeleteRecipe(rid) {
+  const btns = $$("#modalRoot .modal-foot button");
+  btns.forEach((b) => (b.disabled = true));
+  try {
+    await api(`/api/recipes/${encodeURIComponent(rid)}`, { method: "DELETE" });
+    S.schema.recipes = (S.schema.recipes || []).filter((x) => x.id !== rid);
+    closeModal();
+    renderRecipeSelect();
+    toast(`已删除配方 ${rid}`);
+    status("已删除配方", rid);
+  } catch (e) {
+    btns.forEach((b) => (b.disabled = false));
+    toast("删除失败：" + e.message, true);
+  }
+}
+window.doDeleteRecipe = doDeleteRecipe;
+
+function openSaveRecipeModal() {
+  if (!chainDirty() || !S.stages.length) return;
+  const seq = S.stages.map((s) => s.op).join(" → ");
+  openModal("保存为配方", `
+    <div class="field"><label>配方名称</label>
+      <input type="text" id="rcpName" maxlength="24" placeholder="例如：铜线低照度 · 三步"></div>
+    <div class="field" style="margin-bottom:0">
+      <label>将保存这条链（${S.stages.length} 个节点）</label>
+      <div class="reason">${esc(seq)}</div></div>
+    <div class="reason" style="margin-top:12px">
+      参数按当前界面上的值存。保存后可在「套用配方」里一键套用，也会进导出配置单的方案列表。</div>`,
+    `<button onclick="closeModal()">取消</button>
+     <button class="primary" onclick="doSaveRecipe()">保存</button>`);
+  const inp = $("#rcpName");
+  if (inp) {
+    inp.focus();
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") doSaveRecipe(); });
+  }
+}
+window.openSaveRecipeModal = openSaveRecipeModal;
+
+async function doSaveRecipe() {
+  const inp = $("#rcpName");
+  const name = (inp ? inp.value : "").trim();
+  const btns = $$("#modalRoot .modal-foot button");
+  btns.forEach((b) => (b.disabled = true));
+  try {
+    const d = await postJson("/api/recipes", { name, stages: S.stages });
+    closeModal();
+    S.schema.recipes.push(d.recipe);
+    renderRecipeSelect(d.recipe.id);
+    markBase();
+    const notes = (d.notes || []).filter(Boolean);
+    toast(`已保存为配方 ${d.recipe.id}${notes.length ? "（" + notes.join("；") + "）" : ""}`);
+    status("已保存配方", `${d.recipe.id} · ${d.recipe.desc}`);
+  } catch (e) {
+    btns.forEach((b) => (b.disabled = false));
+    // 404/405 几乎只有一种原因：后端进程还是旧的（接口没重启出来）
+    const stale = /Not Found|Method Not Allowed/i.test(e.message || "");
+    toast("保存失败：" + (stale
+      ? "后端还没有保存接口，进程是旧的——重启一次 run.py 再试"
+      : e.message), true);
+  }
+}
+window.doSaveRecipe = doSaveRecipe;
 
 /* ---------------------------------------------------------------- 核验 */
 
@@ -1158,7 +1508,7 @@ function candidateList() {
   return out.slice(0, 5);
 }
 
-const VERDICT_CN = { pass: "可过", warn: "告警", reject: "拒绝" };
+const VERDICT_CN = { pass: "可过", warn: "警告", reject: "拒绝" };
 
 function renderCandidateSwitcher() {
   const box = $("#candSwitcher");
@@ -1197,6 +1547,7 @@ async function switchCandidate(rid) {
     S.aiStages = JSON.parse(JSON.stringify(d.stages || []));
     S.phase = d.phase || "preset";
     S.rationale = "";
+    markBase();
     renderChain();
     await previewChain(true);
     await refreshSampleFlags();
@@ -1481,6 +1832,36 @@ function closeModal() {
 }
 window.closeModal = closeModal;
 
+/* 二级弹窗：叠在主弹窗之上，只关自己那一层。
+   主弹窗的数据不动、滚动位置不丢，看完说明按「返回」回到原处。 */
+function openSubModal(title, bodyHTML) {
+  const root = $("#modalRoot");
+  if (!root) return;
+  const wrap = document.createElement("div");
+  wrap.className = "modal-mask sub";
+  wrap.innerHTML = `<div class="modal sub">
+      <div class="modal-head"><span>${esc(title)}</span>
+        <button class="close" onclick="closeSubModal()">×</button></div>
+      <div class="modal-body">${bodyHTML}</div>
+      <div class="modal-foot"><button onclick="closeSubModal()">返回</button></div>
+    </div>`;
+  wrap.addEventListener("click", (e) => {
+    if (e.target === wrap) closeSubModal();
+  });
+  root.appendChild(wrap);
+  root.style.pointerEvents = "auto";
+}
+window.openSubModal = openSubModal;
+
+function closeSubModal() {
+  const el = document.querySelector("#modalRoot .modal-mask.sub");
+  if (!el) return;
+  el.remove();
+  // 主弹窗也没了的话，遮罩不该继续吃掉点击
+  if (!$("#modalRoot").children.length) $("#modalRoot").style.pointerEvents = "none";
+}
+window.closeSubModal = closeSubModal;
+
 /* 折叠开关：只影响当前渲染，不写库 —— 这是看的方式，不是数据 */
 function toggleRounds() {
   S.roundsOpen = !S.roundsOpen;
@@ -1735,7 +2116,8 @@ window.testVision = testVision;
 
 async function openPreflight() {
   if (!S.batchId) return toast("先选一个批次", true);
-  openModal("算子准入表", `<div class="empty-hint"><span class="spin"></span> 正在跑 11 条算子链 × 4 张样本，约 15–25 秒…<br>
+  const nChain = (S.schema.recipes || []).filter((r) => r.id !== "r00_baseline").length;
+  openModal("算子准入表", `<div class="empty-hint"><span class="spin"></span> 正在跑 ${nChain} 条算子链 × 4 张样本，约 15–30 秒…<br>
     <span class="small muted">这一步不调模型，纯算子计算，结果可重复</span></div>`,
     `<button onclick="closeModal()">关闭</button>`);
   try {
@@ -1744,7 +2126,7 @@ async function openPreflight() {
     if (!body) return;   // 用户中途关掉了弹窗，别炸
     const rows = d.rows.map((r) => `<tr>
       <td>${esc(r.recipe_id)}</td>
-      <td class="txt">${esc(r.desc)}</td>
+      <td class="txt">${r.custom ? '<span class="badge">自定义</span> ' : ""}${esc(r.desc)}</td>
       <td>${(r.reject_rate * 100).toFixed(0)}%</td>
       <td>${r.mean_clip * 100 < 0.01 ? "0.0" : (r.mean_clip * 100).toFixed(1)}%</td>
       <td>σ${(r.mean_noise_abs * 255).toFixed(1)}</td>
@@ -1754,7 +2136,7 @@ async function openPreflight() {
     body.innerHTML = `
       <p style="margin-top:0;color:var(--text-2)">
         这张表回答一个问题：<b>每条算子链处理出来的图，还能不能用来标注、能不能照着配产线。</b>
-        它把配方库里的链在几张样本上各跑一遍，统计被伪影闸门拒绝的比例——拒绝率高的链会把噪声、
+        它把配方库里的链（<b>含你自己保存的</b>）在几张样本上各跑一遍，统计被伪影闸门拒绝的比例——拒绝率高的链会把噪声、
         量化台阶放大成假缺陷，标进去就是错标签，所以宁可先禁用。
         全程不调模型、不需要人工，是这套工具里唯一能离线批量产出的结论表；选链之前先看这里。
       </p>
@@ -1881,6 +2263,11 @@ function bindEvents() {
     const rid = $("#recipeSelect").value;
     if (rid) applyRecipeById(rid);
   });
+
+  $("#recipeSelect").addEventListener("change", syncRecipeBtns);
+  $("#delRecipeBtn").addEventListener("click", openDeleteRecipeModal);
+
+  $("#saveRecipeBtn").addEventListener("click", openSaveRecipeModal);
 
   $$(".mode-btn").forEach((b) => b.addEventListener("click", () => {
     $$(".mode-btn").forEach((x) => x.classList.remove("active"));
@@ -2033,11 +2420,7 @@ async function boot() {
   bindEvents();
   try {
     S.schema = await api("/api/schema");
-    const sel = $("#recipeSelect");
-    sel.innerHTML = S.schema.recipes
-      .filter((r) => r.id !== "r00_baseline")
-      .map((r) => `<option value="${r.id}">${esc(r.id)} · ${esc(r.desc)}</option>`)
-      .join("");
+    renderRecipeSelect();
   } catch (e) {
     toast("加载算子表失败，后端未启动？", true);
     return;

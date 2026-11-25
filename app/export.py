@@ -432,17 +432,35 @@ def build_export(store, batch: dict, out_dir: str, only_accepted: bool = False,
     return manifest
 
 
+def _cell(v) -> str:
+    """表格单元格的转义：竖线会把列冲散，换行会把行冲散。"""
+    return str(v if v is not None else "").replace("|", "\\|").replace("\n", " ").strip()
+
+
 def render_pipeline_md(batch: dict, pipelines: list[dict], items: list[dict],
                        export_filter: dict | None = None,
                        native_notes: list[dict] | None = None) -> str:
-    """给流程搭建的人看的一页纸。不解释算法原理，只讲怎么配、配完多快。"""
+    """给流程搭建的人看的一页纸。
+
+    只讲三件事：这条链怎么配、配完多快、哪张图有问题。
+    算法原理不写在这里——那是界面上「指标 / 伪影审计」的说明弹窗干的事。
+    """
     L = []
+    total_script = sum(len(p["script_nodes"]) for p in pipelines)
+    n_acc = sum(1 for it in items if it.get("accepted"))
     L.append(f"# 流程配置 · {batch.get('name', '')}")
     L.append("")
-    L.append(f"目标平台：**海康 VisionMaster**　导出时间：{time.strftime('%Y-%m-%d %H:%M')}")
-    L.append(f"生成工具：Preproc Studio v{__version__}")
-    n_acc = sum(1 for it in items if it.get("accepted"))
-    L.append(f"样本数：{len(items)}（其中 {n_acc} 张已通过人工核验）　方案数：{len(pipelines)}")
+    L.append(f"目标平台：**海康 VisionMaster**　"
+             f"导出时间：{time.strftime('%Y-%m-%d %H:%M')}　"
+             f"生成工具：Preproc Studio v{__version__}")
+    L.append("")
+    # 一段话交代完整：多少图、核没核验、几个方案、要不要写脚本。
+    # 原来这四项散在三行里，还要翻到"先看这里"才知道有没有脚本节点。
+    summary = [f"**{len(items)}** 张样本", f"**{n_acc}** 张已核验",
+               f"**{len(pipelines)}** 个方案"]
+    summary.append(f"**{total_script}** 个节点需脚本" if total_script
+                   else "全部节点可原生配置")
+    L.append("　·　".join(summary))
     if export_filter and export_filter.get("skipped_unverified"):
         L.append("")
         L.append(f"> 本次只导出了**已通过核验**的样本，"
@@ -455,15 +473,11 @@ def render_pipeline_md(batch: dict, pipelines: list[dict], items: list[dict],
 
     L.append("## 先看这里")
     L.append("")
-    total_script = sum(len(p["script_nodes"]) for p in pipelines)
-    if total_script:
-        L.append(f"有 **{total_script}** 个节点在 VM 里没有原生模块，必须用脚本模块实现，"
-                 f"已在下面逐条标出并附参考代码。其余节点可直接用原生模块按参数配。")
-    else:
-        L.append("所有节点在 VM 里都有原生模块，可直接配置，无需写脚本。")
-    L.append("")
-    L.append("**耗时**以样本实测为准，其余分辨率按 ms/百万像素线性外推，属估算值。"
-             "上产线前请在实际分辨率下再测一次。")
+    L.append("- **怎么配**：按下面每个方案的节点顺序，在 VM 里逐个选模块、填参数。"
+             "标「需脚本」的节点用脚本模块，参考代码附在该方案末尾。")
+    L.append("- **耗时**：以样本实测为准，其他分辨率按 ms/百万像素线性外推，是估算值，"
+             "上产线前请在实际分辨率复测一次。")
+    L.append("- **怎么核对**：拿 `compare/` 里的原图｜增强图对照，确认 VM 跑出来和这里一致。")
     L.append("")
 
     # 导出链上的审计是在整幅图上、按最终要配的链重算的，
@@ -493,103 +507,106 @@ def render_pipeline_md(batch: dict, pipelines: list[dict], items: list[dict],
     for pi, p in enumerate(pipelines, start=1):
         L.append(f"## 方案 {pi}：{p['desc']}")
         L.append("")
-        if p.get("kind") == "solo":
-            L.append(f"覆盖 {p['covers']} 张图（人工指定的链，未参与分组投票）"
-                     f"　节点数 {len(p['stages'])}")
+        # 一行交代完整：覆盖多少、一致率、几个节点、跑多快。
+        # 原来这些分散在三处，配置的人要跳着读。
+        head = [f"覆盖 **{p['covers']}** 张图"]
+        head.append("人工指定，未参与分组投票" if p.get("kind") == "solo"
+                    else f"组内一致率 {p['consistency'] * 100:.0f}%")
+        head.append(f"{len(p['stages'])} 个节点")
+        t = p.get("timing")
+        if t:
+            head.append(f"实测 **{t['base_ms']} ms** @ {t['base_w']}×{t['base_h']}")
+        L.append("　·　".join(head))
+        L.append("")
+
+        if t and t.get("note"):
+            L.append(f"> {t['note']}")
+            L.append("")
+
+        if not p["nodes"]:
+            # 空链会渲染成一张只有表头的表，看着像生成失败，得说清楚是什么情况
+            L.append("> 这条链没有节点（样本未分析，或链被清空），配不出流程——"
+                     "回界面给它补一条链再导。")
+            L.append("")
         else:
-            L.append(f"覆盖 {p['covers']} 张图，组内一致率 {p['consistency'] * 100:.0f}%"
-                     f"　节点数 {len(p['stages'])}")
-        L.append("")
-
-        if p.get("timing"):
-            t = p["timing"]
-            L.append(f"实测基准：{t['base_w']}×{t['base_h']}　**{t['base_ms']} ms**　"
-                     f"（{t['ms_per_mp']} ms/百万像素）")
+            L.append("| # | 算子 | VM 模块 | 参数 | 说明 |")
+            L.append("|---|---|---|---|---|")
+            for n in p["nodes"]:
+                flag = {"native": "原生", "combo": "组合", "script": "**需脚本**"}[n["how"]]
+                params = "、".join(f"`{k}={v}`" for k, v in n["params"].items()) or "—"
+                desc = n["semantics"] or "—"
+                if n["note"]:
+                    desc = f"{desc}；{n['note']}"
+                mod = n["vm_module"] or "无（需脚本实现）"
+                L.append(f"| {n['node']} | `{n['op']}` {flag} | {_cell(mod)} | "
+                         f"{_cell(params)} | {_cell(desc)} |")
             L.append("")
-            if t.get("note"):
-                L.append(f"> {t['note']}")
+
+        if t:
+            est = [f"{r['label']} ≈ {r['ms']} ms" for r in t["rows"] if not r["measured"]]
+            if est:
+                L.append(f"耗时外推（估算，非实测；{t['ms_per_mp']} ms/百万像素）："
+                         + "　".join(est))
                 L.append("")
-            L.append("| 分辨率 | 预估耗时 | 来源 |")
-            L.append("|---|---|---|")
-            for r in t["rows"]:
-                L.append(f"| {r['label']} | {r['ms']} ms | {'实测' if r['measured'] else '估算'} |")
-            L.append("")
 
-        L.append("### 节点清单")
-        L.append("")
-        for n in p["nodes"]:
-            flag = {"native": "原生", "combo": "组合", "script": "**需脚本**"}[n["how"]]
-            L.append(f"**{n['node']}. `{n['op']}`** — {flag}")
+        # 只有真需要脚本的节点才贴代码。原先是只要算子带参考实现就贴，
+        # 原生节点也挂一段 python，一页纸里一半是配流程时根本用不上的东西。
+        scripts = [n for n in p["nodes"] if n["how"] == "script" and n.get("script")]
+        if scripts:
+            L.append("### 需要脚本的节点")
             L.append("")
-            if n["params"]:
-                params = "，".join(f"`{k}={v}`" for k, v in n["params"].items())
-                L.append(f"- 参数：{params}")
-            L.append(f"- VM 模块：{n['vm_module'] or '无（需脚本实现）'}")
-            if n["semantics"]:
-                L.append(f"- 算法语义：{n['semantics']}")
-            if n["note"]:
-                L.append(f"- 注意：{n['note']}")
-            if n.get("script"):
+            for n in scripts:
+                L.append(f"**{n['node']}. `{n['op']}`**")
                 L.append("")
                 L.append("```python")
                 L.append(n["script"])
                 L.append("```")
-            L.append("")
+                L.append("")
 
+    # 逐张明细与核验状态合并成一张表：原本两张表每张都是"一行一张图"，
+    # 字段只差核验/改动/得分，配置的人要来回对着看才拼出完整状态。
     L.append("## 逐张明细")
     L.append("")
-    L.append("| 文件 | 方案 | 分辨率 | 耗时 | 审计 |")
-    L.append("|---|---|---|---|---|")
+    L.append("| 文件 | 方案 | 分辨率 | 耗时 | 审计 | 核验 | 改动 | 得分 |")
+    L.append("|---|---|---|---|---|---|---|---|")
     any_differ = False
     for it in items:
         if it.get("error"):
-            L.append(f"| {it['filename']} | — | — | — | 失败：{it['error']} |")
+            L.append(f"| {it['filename']} | — | — | — | 失败：{_cell(it['error'])} "
+                     f"| — | — | — |")
             continue
-        v = {"pass": "通过", "warn": "告警", "reject": "拒绝"}.get(
+        v = {"pass": "通过", "warn": "警告", "reject": "拒绝"}.get(
             it["audit"]["verdict"], "—")
         plan_cell = it["recipe_id"] + ("·参数微调" if it.get("params_differ") else "")
+        if not it.get("stages"):
+            plan_cell += "·空链"
         any_differ = any_differ or bool(it.get("params_differ"))
-        L.append(f"| {it['filename']} | {plan_cell} | "
-                 f"{it['resolution'][0]}×{it['resolution'][1]} | {it['ms']} ms | {v} |")
+        acc = "已核验" if it.get("accepted") else "未核验"
+        edt = (f"改过 {it['edit_count']} 处" if it.get("edit_count")
+               else ("改过" if it.get("edited") else "未改"))
+        sc = it.get("score")
+        sc_txt = f"{sc:+.3f}" if sc is not None else "—"
+        L.append(f"| {it['filename']} | {_cell(plan_cell)} | "
+                 f"{it['resolution'][0]}×{it['resolution'][1]} | {it['ms']} ms | {v} | "
+                 f"{acc} | {edt} | {sc_txt} |")
     L.append("")
     if any_differ:
         L.append("> 标「参数微调」的样本，实际参数与该方案的基准参数略有差异（参数精修产生）。"
                  "这类样本按 `manifest.json` 里记录的实际参数配，或直接用它的增强图核对。")
         L.append("")
 
-    L.append("## 目录说明")
+    L.append("## 包内有什么")
     L.append("")
-    L.append("| 目录 | 内容 |")
-    L.append("|---|---|")
-    L.append("| `debug_samples/` | 增强图，导入 VM 做流程验证（文件名与原图一致） |")
-    L.append("| `compare/` | 原图\\|增强图并排，用于核对 VM 输出是否一致 |")
+    L.append("- `debug_samples/`　增强图，文件名与原图一致，可直接导入 VM 跑流程验证")
+    L.append("- `compare/`　原图｜增强图并排，配完流程拿它核对 VM 输出是否一致")
     with_json = bool((export_filter or {}).get("with_json"))
     if with_json:
-        L.append("| `pipeline.json` | 机读配置单（给脚本用，手工配流程不需要） |")
-        L.append("| `manifest.json` | 逐张对照索引与审计结论（给脚本用） |")
-        L.append("| `edits.jsonl` | 人工改动流水（给脚本用） |")
+        L.append("- `pipeline.json` / `manifest.json` / `edits.jsonl`　机读配置单、"
+                 "逐张索引与人工改动流水（给脚本用，手工配流程不需要）")
     else:
         L.append("")
         L.append("> 本次未包含 JSON。需要脚本化生成流程模板或做回归核对时，"
                  "重新导出时勾选「同时导出机器可读配置」。")
-    L.append("")
-
-    # 核验状态单独列一张表：流程搭好之后要回溯"这条链是谁确认过的"，
-    # 只有 json 里有这个字段等于没人看得见
-    L.append("## 样本核验状态")
-    L.append("")
-    L.append("| 样本 | 采用方案 | 人工核验 | 人工改过 | 得分 |")
-    L.append("|---|---|---|---|---|")
-    for it in items:
-        if it.get("error"):
-            continue
-        acc = "已核验" if it.get("accepted") else "未核验"
-        edt = f"改过 {it['edit_count']} 处" if it.get("edit_count") else (
-            "改过" if it.get("edited") else "未改")
-        sc = it.get("score")
-        L.append(f"| {it['filename']} | {it['recipe_id']} | {acc} | {edt} | "
-                 f"{sc:+.3f} |" if sc is not None else
-                 f"| {it['filename']} | {it['recipe_id']} | {acc} | {edt} | — |")
     L.append("")
     return "\n".join(L)
 

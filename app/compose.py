@@ -101,7 +101,7 @@ def _fmt_tried(tried: list[dict]) -> str:
             continue
         chain = "→".join(s.get("op", "?") for s in (r.get("stages") or []))
         verdict = (r.get("audit") or {}).get("verdict", "?")
-        cn = {"pass": "通过", "warn": "告警", "reject": "被拒"}.get(verdict, verdict)
+        cn = {"pass": "通过", "warn": "警告", "reject": "被拒"}.get(verdict, verdict)
         why = ""
         reasons = (r.get("audit") or {}).get("reasons") or []
         if reasons:

@@ -706,7 +706,10 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .quick-apply { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.quick-apply select { max-width: 264px; height: 28px; }
+/* 180 而不是 264：底栏还要放「套用」「删除」两个按钮，
+   1280 宽时 264 会把「通过核验」挤到重叠。选项文字会在控件里截断，
+   当前选中项的完整文字挂到 title 上（syncRecipeBtns 里维护）。 */
+.quick-apply select { max-width: 180px; height: 28px; }
 .verify-actions { margin-left: auto; display: flex; gap: 8px; }
 
 /* 迭代记录：表格行 */
@@ -1092,9 +1095,114 @@ input[type="range"]::-moz-range-thumb {
   justify-content: flex-end;
 }
 
-.field { margin-bottom: 16px; }
+/* 二级弹窗：叠在主弹窗之上，窄一档——两层同宽会让人以为"又打开了一页"。
+   遮罩比主层淡，视觉上仍是同一件事的第二层，不是另起一个流程。 */
+.modal-mask.sub {
+  z-index: 2;
+  background: rgba(24, 26, 30, .24);
+}
 
-.field label {
+.modal.sub {
+  max-width: 520px;
+  max-height: 72vh;
+}
+
+/* 生成方案进度弹窗：只报"已用时"这个真数字，不给百分比。
+   请求返回前服务端没有任何中间态可报，进度条做成不确定态流动，
+   比一条走到 90% 就卡住的假进度老实。 */
+.progress-card {
+  width: 100%;
+  max-width: 392px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px 16px;
+}
+
+.progress-top { display: flex; gap: 12px; align-items: flex-start; }
+
+.progress-top .spin {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  margin-top: 3px;
+}
+
+/* 完成态：转圈换成对勾，数字定住 0.9 秒再关窗 */
+.progress-check {
+  flex: 0 0 auto;
+  width: 14px;
+  margin-top: 1px;
+  font-size: 15px;
+  line-height: 1.2;
+  color: var(--ok);
+  text-align: center;
+}
+
+.progress-title { font-size: 15px; font-weight: 500; line-height: 1.4; }
+
+.progress-stage {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+  min-height: 20px;
+}
+
+.progress-track {
+  position: relative;
+  height: 4px;
+  margin: 16px 0 10px;
+  background: var(--inset);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-track i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #A8BCDF, transparent);
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-track i { animation-duration: 3s; }
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.progress-meta b {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-foot {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.field { margin-bottom: 16px; }.field label {
   display: block;
   font-size: 13px;
   color: var(--text-2);

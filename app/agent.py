@@ -36,10 +36,10 @@ from .recipes import DIAGNOSIS_MAP, DIAGNOSES, RECIPE_BY_ID, candidates_for
 MIN_GAIN = 0.02      # 分数提升低于此值视为没进步
 MAX_ROUNDS = 3
 
-# 推荐时给"带告警"的方案扣一点分。
-# 纯按分数选会推荐一条 banding 告警、但分数高 0.02 的链，
-# 工程上不划算——告警意味着标注员可能标到假结构。
-# 扣分制让"干净且接近"的方案胜出，同时不至于埋没明显更好的告警方案。
+# 推荐时给"带警告"的方案扣一点分。
+# 纯按分数选会推荐一条 banding 警告、但分数高 0.02 的链，
+# 工程上不划算——警告意味着标注员可能标到假结构。
+# 扣分制让"干净且接近"的方案胜出，同时不至于埋没明显更好的警告方案。
 VERDICT_PENALTY = {"pass": 0.0, "warn": 0.06, "reject": float("inf")}
 
 
@@ -331,7 +331,7 @@ def _explain(best: dict, base_m: dict, diagnoses: list[str]) -> str:
         bits.append(f"截断率 {d['clip']['value'] * 100:.1f}%")
     label = "、".join(DIAGNOSES[x]["label"] for x in diagnoses if x in DIAGNOSES)
     audit = best["audit"]["verdict"]
-    verdict_cn = {"pass": "通过闸门", "warn": "带告警通过", "reject": "未通过"}.get(audit, audit)
+    verdict_cn = {"pass": "通过闸门", "warn": "带警告通过", "reject": "未通过"}.get(audit, audit)
     return f"针对「{label}」：{best['desc']}；{('，'.join(bits))}；伪影审计{verdict_cn}。"
 
 
@@ -388,16 +388,21 @@ def aggregate_batch(items: list[dict], consistency_floor: float = 0.8) -> dict:
 
 # ---------------------------------------------------------------- 算子准入表
 
-def preflight(images: list[np.ndarray], max_side: int = 1280) -> dict:
+def preflight(images: list[np.ndarray], max_side: int = 1280,
+              recipes: list[dict] | None = None) -> dict:
     """所有算子链 × 若干图，跑一遍伪影审计，产出"哪条链可以用于标注/配流程"的准入表。
 
     这张表不依赖 VLM、不依赖人工，是整套方案里唯一可以纯自动生成的结论。
+
+    recipes 显式传入时以它为准（内置配方 + 用户自己存的链）。不传就退回注册表，
+    兼容老调用方——但注册表是内存副本，手动改过 custom_recipes.json 会读到旧的。
     """
     # baseline 不参与准入判断：它是原图本身，没有"能不能用于标注"的问题
-    names = [k for k in RECIPE_BY_ID if k != "r00_baseline"]
+    src = recipes if recipes is not None else list(RECIPE_BY_ID.values())
+    chain_list = [r for r in src if r.get("id") != "r00_baseline"]
     rows = []
-    for rid in names:
-        rec = RECIPE_BY_ID[rid]
+    for rec in chain_list:
+        rid = rec["id"]
         verdicts, risks, clips, noises, noises_abs, scores = [], [], [], [], [], []
         for img in images:
             work = _downscale(img, max_side)
@@ -421,7 +426,8 @@ def preflight(images: list[np.ndarray], max_side: int = 1280) -> dict:
         rows.append({
             "recipe_id": rid,
             "desc": rec["desc"],
-            "family": rec["family"],
+            "family": rec.get("family", ""),
+            "custom": bool(rec.get("custom")),
             "n": len(verdicts),
             "reject_rate": round(rej, 3),
             "warn_rate": round(verdicts.count("warn") / len(verdicts), 3),

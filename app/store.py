@@ -60,6 +60,7 @@ class Store:
         self.exports_dir = os.path.join(root, "exports")
         self.edits_path = os.path.join(root, "edits.jsonl")
         self.config_path = os.path.join(root, "config.json")
+        self.recipes_path = os.path.join(root, "custom_recipes.json")
         for d in (self.batches_dir, self.uploads_dir, self.exports_dir):
             os.makedirs(d, exist_ok=True)
 
@@ -251,6 +252,32 @@ class Store:
             "by_op": by_op,
             "recent": edits[-20:][::-1],
         }
+
+    # ------------------------------------------------------------ 自定义算子链
+    # 存在 data/custom_recipes.json，和配方库（代码里写死的 RECIPES）分开放：
+    # 一个是产品的默认能力，一个是这个人在这个项目里攒下来的链，
+    # 混在一起会导致升级时不知道该覆盖谁。
+
+    def list_recipes(self) -> list[dict]:
+        items = self._read_json(self.recipes_path) or []
+        return [x for x in items
+                if isinstance(x, dict) and x.get("id") and isinstance(x.get("stages"), list)]
+
+    def add_recipe(self, rec: dict) -> dict:
+        with LOCK:
+            items = self.list_recipes()
+            items.append(rec)
+            self._write_json(self.recipes_path, items)
+        return rec
+
+    def delete_recipe(self, rid: str) -> bool:
+        with LOCK:
+            items = self.list_recipes()
+            keep = [x for x in items if x.get("id") != rid]
+            if len(keep) == len(items):
+                return False
+            self._write_json(self.recipes_path, keep)
+        return True
 
     # ------------------------------------------------------------ 工具
 

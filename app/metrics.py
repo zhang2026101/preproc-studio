@@ -208,8 +208,8 @@ def audit_artifact(m: dict, base: dict) -> dict:
              "value": round(noise_abs, 4)}
         )
     # 台阶判据用**绝对值**而不是增量。
-    # 用增量会让"每一条 normalize 链"都被告警——拉伸本来就会改变空 bin 占比，
-    # 告警一泛滥就失去了区分度。真正该拦的是"增强后仍有大量空 bin（≥35%）"。
+    # 用增量会让"每一条 normalize 链"都被警告——拉伸本来就会改变空 bin 占比，
+    # 警告一泛滥就失去了区分度。真正该拦的是"增强后仍有大量空 bin（≥35%）"。
     if m["banding"] > GATE["banding_max"]:
         reasons.append(
             {"level": "warn", "code": "banding",
