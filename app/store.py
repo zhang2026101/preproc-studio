@@ -196,8 +196,16 @@ class Store:
                     return s
         raise KeyError(f"样本不存在: {sid}")
 
+    def abs_path(self, p: str) -> str:
+        """把样本路径解析成真实路径。
+
+        批次里写的可能是绝对路径，也可能是相对 data 目录的路径
+        （打包成 exe 分发时只能存相对路径，否则换台电脑就失效）。
+        """
+        return p if os.path.isabs(p) else os.path.join(self.root, p)
+
     def load_image(self, sample: dict) -> np.ndarray | None:
-        return imread_unicode(sample["path"])
+        return imread_unicode(self.abs_path(sample["path"]))
 
     # ------------------------------------------------------------ 编辑流水
 

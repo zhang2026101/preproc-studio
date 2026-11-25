@@ -30,7 +30,9 @@ from .recipes import DIAGNOSES, RECIPES, RECIPE_BY_ID, candidates_for
 from .store import Store, imread_unicode
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+# 打包成 exe 后，ROOT 是解包出来的临时目录（每次启动都会换），
+# 数据放那里等于"演示完就丢"。所以允许外部指定，默认仍用项目下的 data。
+DATA = os.environ.get("PREPROC_DATA") or os.path.join(ROOT, "data")
 STATIC = os.path.join(ROOT, "static")
 
 store = Store(DATA)
@@ -284,11 +286,13 @@ def delete_sample(bid: str, sid: str):
     if not b:
         raise HTTPException(404, "批次不存在")
     s = store.get_sample(bid, sid)
-    if s and os.path.exists(s["path"]):
-        try:
-            os.remove(s["path"])
-        except OSError:
-            pass
+    if s:
+        p = store.abs_path(s["path"])
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     b["samples"] = [x for x in b["samples"] if x["id"] != sid]
     store.save_batch(b)
     return {"ok": True}

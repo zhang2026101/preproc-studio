@@ -1,6 +1,11 @@
 # 预处理工作台 · Preproc Studio
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/zhang2026101/preproc-studio)
+
 **v1.1.0**　Python 3.12 · FastAPI · OpenCV　无前端框架
+
+> 想直接跑一遍：点上面的按钮，在浏览器里开一个云端环境，依赖会自动装好、
+> 服务自动起来、端口自动转发。不需要在本地装 Python（需要登录 GitHub 账号）。
 
 AI 读图诊断成像问题 → 生成并拼接算子链 → 用指标与闸门核验 → 导出可直接配进
 海康 VisionMaster 的流程配置。人工可随时增删算子、调参数，每一步都能看到中间态。
@@ -54,6 +59,9 @@ AI 读图诊断成像问题 → 生成并拼接算子链 → 用指标与闸门�
 ---
 
 ## 快速开始
+
+不想在本地配环境，可以用上面的 Codespaces 按钮直接在浏览器里跑；
+本地运行按下面三步：
 
 ```bash
 # 依赖：fastapi / uvicorn / python-multipart / numpy / opencv-python
